@@ -1,5 +1,12 @@
 # Koopalings - Sprint 26.05 Iteration Report
 
+## Required AI artifacts (Iteration 26.05+)
+
+- Prompt (canonical): https://newwiki.realpage.com/display/PM/os-agilelead-report.prompt.md
+	- Repo snapshot: ai-reporting/os-agilelead-report.prompt.md
+- Agent specification (strict): https://newwiki.realpage.com/display/PM/os-team-report.agent.md
+	- Repo snapshot: ai-reporting/os-team-report.agent.md
+
 **Team:** Koopalings  
 **Project:** PropertyManagement  
 **Iteration:** Sprint 26.05 (Feb 25 – Mar 10, 2026)  
