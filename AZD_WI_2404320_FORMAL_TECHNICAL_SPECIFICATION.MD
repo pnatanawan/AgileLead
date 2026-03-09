@@ -1129,6 +1129,450 @@ END
 
 ---
 
+#### 3.2 Complete Stored Procedure Date Range Analysis for All 16 Workflows
+
+**Reference Document:** [WI-2404320_COMPLETE_STORED_PROCEDURE_DATE_ANALYSIS.md](WI-2404320_COMPLETE_STORED_PROCEDURE_DATE_ANALYSIS.md)
+
+This section provides a comprehensive breakdown of all 16 workflows displayed in the Task Summary widget and their date range filtering implementation requirements.
+
+##### 3.2.1 Workflow Status Summary
+
+| # | Workflow Code | Workflow Name | Current Status | Recommended Approach | Priority | Implementation |
+|---|---|---|---|---|---|---|
+| 1 | MIN | Move-in | ⚠️ Partial | Add leaMoveInDate BETWEEN clause | High | 1 line |
+| 2 | MOU | Move-out | ⚠️ Partial | Expand leaNoticeForDate BETWEEN | High | 1 line |
+| 3 | RFAS | Resident FAS | ⚠️ Partial | Add leaEndDate BETWEEN clause | High | 1 line |
+| 4 | ApplicantFAS | Applicant FAS | ⚠️ Partial | Add leaEndDate BETWEEN clause | High | 1 line |
+| 5 | FAS-PEND | FAS Pending | ⚠️ Partial | Add leaEndDate BETWEEN clause | High | 1 line |
+| 6 | NRFAS | Non-Resident FAS | ⚠️ Partial | Add FSRH.CreatedDate BETWEEN | High | 1 line |
+| 7 | TRAN | Transfer | ✅ Complete | ALREADY USED BETWEEN | None | No change |
+| 8 | TRANSOUT | Transfer Out | ✅ Complete | ALREADY USED BETWEEN | None | No change |
+| 9 | GFR | Guarantor Form Required | ❌ Zero | Modify uspGuarantorTaskListSelectCount_UPM | High | 5-10 lines |
+| 10 | Appointment | Appointment | ❌ Zero* | Fix @LV_StartDate/@LV_ENDDate init (CRITICAL BUG) | **CRITICAL** | 2 lines |
+| 11 | FUP | Follow-up | ❌ Zero* | Fix @LV_StartDate/@LV_ENDDate init (CRITICAL BUG) | **CRITICAL** | 2 lines |
+| 12 | APPINPROG | Application in Progress | ❌ Zero | Modify uspTasksLGAppsInProgressCountSelect_UPM | High | 5-10 lines |
+| 13 | FAS-READY-APP | FAS Ready for Approval | ❌ Zero | Modify uspFASRefundCountSelect_UPM | High | 5-10 lines |
+| 14 | FAS-REJECTED | FAS Rejected | ❌ Zero | Modify uspFASRefundCountSelect_UPM | High | 5-10 lines |
+| 15 | PVR | Pending Virtual Refunds | ❌ Zero | Add RP.CreatedDate BETWEEN inline | Medium | 1 line |
+| 16 | FVR | Failed Virtual Refunds | ❌ Zero | Add RP.CreatedDate BETWEEN inline | Medium | 1 line |
+| 17 | Waitlist | Conventional Waitlist | ❌ Zero | Modify uspWaitListSelectTiles_UPM | Medium | 5-10 lines |
+
+**Legend:** ✅ = Working | ⚠️ = Partial | ❌ = Not Working | * = Receives NULL dates from uninitialized variables
+
+##### 3.2.2 Critical Bugs Identified
+
+**BUG #1: Undefined Variables in uspTaskSummaryDashboardCount_UPM**
+```sql
+-- LINES 278-279: Variables declared but NEVER initialized
+DECLARE @LV_StartDate VARCHAR(10);     -- ⚠️ NEVER INITIALIZED!
+DECLARE @LV_ENDDate VARCHAR(10);       -- ⚠️ NEVER INITIALIZED!
+
+-- LINES 331-333: These NULL values passed to procedures
+SET @sql = N'P' + @InternalEntityID + N'.DBO.uspNPSTodayTaskListCountSelect_UPM
+    ...@ENDDATE = ''' + @LV_ENDDate + N''',      -- ⚠️ PASSING NULL!
+    ...@STARTDATE = ''' + @LV_StartDate + N''',  -- ⚠️ PASSING NULL!
+```
+
+**Impact:** Appointment and Follow-up counts ignore date range  
+**Fix:**
+```sql
+SET @LV_StartDate = @IPVC_STARTDATE;    -- Initialize from parameter
+SET @LV_ENDDate = @IPVC_ENDDATE;        -- Initialize from parameter
+```
+**Effort:** 2 lines | **Risk:** Low
+
+---
+
+**BUG #2: MOU Query Missing BETWEEN Clause**
+```sql
+-- CURRENT (BUGGY): leaNoticeForDate checked for NOT NULL but no date filtering
+AND L.leaNoticeForDate IS NOT NULL
+AND L.leaTransferCompleteNewBit IS NULL
+AND r.[Status] = 'Pending Move-outs'
+
+-- RECOMMENDED FIX:
+AND L.leaNoticeForDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE
+AND L.leaTransferCompleteNewBit IS NULL
+AND r.[Status] = 'Pending Move-outs'
+```
+
+**Impact:** Move-out counts not filtered by expected move-out date  
+**Effort:** 1 line | **Risk:** Low
+
+---
+
+##### 3.2.2.1 Additional Critical Bugs: Stored Procedures Missing Date Parameters
+
+Beyond the two inline SQL bugs above, comprehensive analysis identified 5 additional stored procedures that require updates to support date range filtering. These procedures are called from `uspTaskSummaryDashboardCount_UPM` but lack date parameters entirely.
+
+**BUG #3: uspFASRefundCountSelect_UPM Missing Date Parameters (Affects: FAS-READY-APP, FAS-REJECTED)**
+
+**File:** `DATABASESETUP\P2\procs\UPM\DashboardTiles\TaskSummaryCount\uspFASRefundCountSelect_UPM.sql`
+
+**Current Procedure Signature:**
+```sql
+CREATE PROCEDURE [dbo].uspFASRefundCountSelect_UPM 
+(
+    @InternalEntityID VARCHAR(10),
+    @InternalUserID VARCHAR(10),
+    @InternalSiteID VARCHAR(10),
+    @RESNAME VARCHAR(30)=NULL,
+    @UnitId VARCHAR(10)=NULL,
+    @FASStatus VARCHAR(1)='0',
+    @ResType VARCHAR(10)=NULL,
+    @FASApprovedBit VARCHAR(1)='0',      -- Only distinguishes approval vs rejection
+    @UnitTo VARCHAR(10)=NULL,
+    @TASKCOUNT INT OUTPUT
+)
+```
+
+**Issue:** 
+- Called from uspTaskSummaryDashboardCount_UPM (lines 340-356)
+- No date parameters accepted
+- Cannot filter FAS approval/rejection by date range
+- Affects 2 workflows: FAS-READY-APP (status 0) and FAS-REJECTED (status 2)
+
+**Required Changes:**
+1. Add parameters:
+   ```sql
+   @IPVC_STARTDATE VARCHAR(10) = NULL,
+   @IPVC_ENDDATE VARCHAR(10) = NULL
+   ```
+2. Convert to DATETIME inside procedure
+3. Add BETWEEN clause to WHERE condition filtering on FAS approval/rejection date
+4. Handle NULL dates (default to current period)
+
+**Impact:** FAS approval/rejection counts currently not date-filtered  
+**Effort:** 5-10 lines (add params + 1-2 BETWEEN clauses) | **Risk:** Medium (must identify correct date columns)
+
+**Call Site (uspTaskSummaryDashboardCount_UPM):**
+```sql
+-- Line 340-341:
+DECLARE @FASApproval INT = 0;
+EXEC dbo.[uspFASRefundCountSelect_UPM]
+    @InternalEntityID = @InternalEntityID,
+    @InternalUserID = @InternalUserID,
+    @InternalSiteID = @InternalSiteID,
+    @FASApprovedBit = '0',               -- 0 = ready for approval
+    @TASKCOUNT = @FASApproval OUTPUT;
+-- MISSING: @IPVC_STARTDATE, @IPVC_ENDDATE
+
+-- Line 346-354:
+DECLARE @FASRejected INT = 0;
+EXEC dbo.[uspFASRefundCountSelect_UPM]
+    @InternalEntityID = @InternalEntityID,
+    @InternalUserID = @InternalUserID,
+    @InternalSiteID = @InternalSiteID,
+    @FASApprovedBit = '2',               -- 2 = rejected
+    @TASKCOUNT = @FASRejected OUTPUT;
+-- MISSING: @IPVC_STARTDATE, @IPVC_ENDDATE
+```
+
+---
+
+**BUG #4: uspGuarantorTaskListSelectCount_UPM Missing Date Parameters (Affects: GFR)**
+
+**File:** `DATABASESETUP\P2\procs\UPM\DashboardTiles\TaskSummaryCount\uspGuarantorTaskListSelectCount_UPM.sql`
+
+**Current Procedure Signature:**
+```sql
+CREATE PROCEDURE [dbo].[uspGuarantorTaskListSelectCount_UPM]
+    @InternalEntityID VARCHAR(10),
+    @InternalUserID VARCHAR(10),
+    @InternalSiteID VARCHAR(10),
+    @TASKCOUNT INT OUTPUT
+```
+
+**Issue:**
+- Called from uspTaskSummaryDashboardCount_UPM (lines 335-338)
+- No date parameters accepted
+- Cannot filter guarantor form requirements by date range
+- Affects 1 workflow: GFR (Guarantor Form Required)
+
+**Required Changes:**
+1. Add parameters:
+   ```sql
+   @IPVC_STARTDATE VARCHAR(10) = NULL,
+   @IPVC_ENDDATE VARCHAR(10) = NULL
+   ```
+2. Pass dates to procedure logic
+3. Add BETWEEN clause to WHERE condition filtering on form due/demand date
+4. Handle NULL dates
+
+**Impact:** Guarantor form counts currently not date-filtered  
+**Effort:** 5-10 lines | **Risk:** Medium
+
+**Call Site (uspTaskSummaryDashboardCount_UPM, lines 335-338):**
+```sql
+DECLARE @GuarantorFormReq INT = 0;
+EXEC dbo.[uspGuarantorTaskListSelectCount_UPM]
+    @InternalEntityID = @InternalEntityID,
+    @InternalUserID = @InternalUserID,
+    @InternalSiteID = @InternalSiteID,
+    @TASKCOUNT = @GuarantorFormReq OUTPUT;
+-- MISSING: @IPVC_STARTDATE, @IPVC_ENDDATE
+```
+
+---
+
+**BUG #5: uspTasksLGAppsInProgressCountSelect_UPM Missing Date Parameters (Affects: APPINPROG)**
+
+**File:** Property-specific database (P + @InternalEntityID)  
+**Stored Procedure Name:** `[Pxxx].[dbo].[uspTasksLGAppsInProgressCountSelect_UPM]` (where xxx = EntityID)
+
+**Current Procedure Call (uspTaskSummaryDashboardCount_UPM, lines 310-316):**
+```sql
+DECLARE @ApplicationInProgress INT = 0;
+SET @sql = N'P' + @InternalEntityID + N'.DBO.[uspTasksLGAppsInProgressCountSelect_UPM]
+    @SITEID = ' + @InternalSiteID + N',
+    @USERID = '''',
+    @TASKCOUNT = @ApplicationInProgress OUTPUT';
+
+EXEC sp_executesql @sql, N'@ApplicationInProgress INT OUTPUT', @ApplicationInProgress OUTPUT;
+-- MISSING: @IPVC_STARTDATE, @IPVC_ENDDATE in dynamic SQL
+```
+
+**Issue:**
+- Called with dynamic SQL (sp_executesql)
+- No date parameters passed
+- Cannot filter application status by date range
+- Affects 1 workflow: APPINPROG (Application in Progress)
+
+**Required Changes:**
+1. Modify dynamic SQL to include date parameters:
+   ```sql
+   SET @sql = N'P' + @InternalEntityID + N'.DBO.[uspTasksLGAppsInProgressCountSelect_UPM]
+       @SITEID = ' + @InternalSiteID + N',
+       @USERID = '''',
+       @IPVC_STARTDATE = ''' + @IPVC_STARTDATE + N''',    -- ADD
+       @IPVC_ENDDATE = ''' + @IPVC_ENDDATE + N''',        -- ADD
+       @TASKCOUNT = @ApplicationInProgress OUTPUT';
+   ```
+2. Modify target procedure to accept @IPVC_STARTDATE and @IPVC_ENDDATE
+3. Add BETWEEN clause to WHERE condition on application creation/submission date
+
+**Impact:** Application in progress counts currently not date-filtered  
+**Effort:** 5-10 lines (3 lines in calling proc + 5-7 in target proc) | **Risk:** Medium
+
+---
+
+**BUG #6: uspNPSTodayTaskListCountSelect_UPM Receives NULL Dates (Affects: Appointment, Follow-up)**
+
+**File:** Property-specific database  
+**Stored Procedure Name:** `[Pxxx].[dbo].[uspNPSTodayTaskListCountSelect_UPM]`
+
+**Current Procedure Call (uspTaskSummaryDashboardCount_UPM, lines 295-307):**
+```sql
+DECLARE @LV_StartDate VARCHAR(10);      -- ⚠️ DECLARED BUT NEVER SET!
+DECLARE @LV_ENDDate VARCHAR(10);        -- ⚠️ DECLARED BUT NEVER SET!
+
+SET @sql = N'P' + @InternalEntityID + N'.DBO.uspNPSTodayTaskListCountSelect_UPM
+    @USERID = ' + @InternalUserID + N',
+    @SITEID = ' + @InternalSiteID + N',
+    @GCID = '''',
+    @CATEGORY = ''Appointment'',
+    @ASSIGNID = ''' + @ASSIGNID + N''',
+    @ENDDATE = ''' + @LV_ENDDate + N''',          -- ⚠️ PASSING NULL!
+    @STARTDATE = ''' + @LV_StartDate + N''',      -- ⚠️ PASSING NULL!
+    @TASKCOUNT = @Appointment OUTPUT';
+```
+
+**Issue:**
+- @LV_StartDate and @LV_ENDDate declared but never initialized (BUG #1)
+- Procedure receives NULL date values
+- Cannot perform date range filtering
+- Affects 2 workflows: Appointment, Follow-up
+
+**Root Cause:** See BUG #1 above (undefined variables)
+
+**Fix:** Initialize the variables immediately after they are declared:
+```sql
+-- Add after line 281:
+SET @LV_StartDate = @IPVC_STARTDATE;    -- Initialize from parameter
+SET @LV_ENDDate = @IPVC_ENDDATE;        -- Initialize from parameter
+
+-- Then the procedure will receive proper dates
+EXEC sp_executesql @sql, ...
+```
+
+**Note:** uspNPSTodayTaskListCountSelect_UPM may already support date range filtering. This fix enables it to receive the actual dates instead of NULL.
+
+**Impact:** Appointment and Follow-up counts currently receive NULL dates (completely broken date filtering)  
+**Effort:** 2 lines in calling proc (already covered in BUG #1) | **Risk:** Low
+
+---
+
+**BUG #7: uspWaitListSelectTiles_UPM Missing Date Parameters (Affects: Conventional Waitlist)**
+
+**File:** `DATABASESETUP\P2\procs\UPM\DashboardTiles\uspWaitListSelectTiles_UPM.sql`
+
+**Current Procedure Call (uspGetTaskSummaryTileSummary_UPM, lines 215-218):**
+```sql
+set @sql = 's' + @InternalSiteID + '.DBO.[uspWaitListSelectTiles_UPM]
+    @InternalEntityID  = ' + @InternalEntityID + ',
+    @InternalSiteID  = ' + @InternalSiteID + ',
+    @TASKCOUNT = @TASKCOUNT OUTPUT'
+
+EXEC sp_executesql @sql, N'@TASKCOUNT INT OUTPUT', @TASKCOUNT OUTPUT;
+-- MISSING: @IPVC_STARTDATE, @IPVC_ENDDATE
+```
+
+**Current Procedure Signature:**
+```sql
+CREATE OR ALTER PROCEDURE dbo.uspWaitListSelectTiles_UPM(
+    @InternalEntityID varchar(10) = NULL, 
+    @InternalSiteID varchar(10) = NULL,
+    @TASKCOUNT int output
+)
+```
+
+**Issue:**
+- Called with dynamic SQL
+- No date parameters accepted
+- Uses hardcoded GETDATE() and system settings
+- Cannot filter waitlist by date range
+- Affects 1 workflow: Conventional Waitlist (Affordable Housing)
+
+**Required Changes:**
+1. Add parameters to procedure signature:
+   ```sql
+   @IPVC_STARTDATE VARCHAR(10) = NULL,
+   @IPVC_ENDDATE VARCHAR(10) = NULL,
+   ```
+2. Modify dynamic SQL call in uspGetTaskSummaryTileSummary_UPM:
+   ```sql
+   set @sql = 's' + @InternalSiteID + '.DBO.[uspWaitListSelectTiles_UPM]
+       @InternalEntityID  = ' + @InternalEntityID + ',
+       @InternalSiteID  = ' + @InternalSiteID + ',
+       @IPVC_STARTDATE = ''' + @IPVC_STARTDATE + N''',     -- ADD
+       @IPVC_ENDDATE = ''' + @IPVC_ENDDATE + N''',         -- ADD
+       @TASKCOUNT = @TASKCOUNT OUTPUT'
+   ```
+3. Inside procedure, replace hardcoded date logic with BETWEEN clause
+4. Add WHERE filter on lease/waitlist entry date
+
+**Impact:** Conventional waitlist counts currently not date-filtered  
+**Effort:** 5-10 lines (2-3 lines in calling proc + 5-7 in target proc) | **Risk:** Medium
+
+---
+
+##### 3.2.3 Summary of All Critical Bugs
+
+| Bug # | Procedure | Issue | Workflows Affected | Effort | Risk | Priority |
+|---|---|---|---|---|---|---|
+| 1 | uspTaskSummaryDashboardCount_UPM | Undefined variables | Appointment, Follow-up | 2 lines | Low | **CRITICAL** |
+| 2 | uspTaskSummaryDashboardCount_UPM | MOU missing BETWEEN | Move-out | 1 line | Low | High |
+| 3 | uspFASRefundCountSelect_UPM | No date parameters | FAS Ready, FAS Rejected | 5-10 lines | Medium | High |
+| 4 | uspGuarantorTaskListSelectCount_UPM | No date parameters | Guarantor Form Req | 5-10 lines | Medium | High |
+| 5 | uspTasksLGAppsInProgressCountSelect_UPM | No date parameters | App in Progress | 5-10 lines | Medium | High |
+| 6 | uspNPSTodayTaskListCountSelect_UPM | Receives NULL dates (related to Bug #1) | Appointment, Follow-up | 2 lines | Low | **CRITICAL** |
+| 7 | uspWaitListSelectTiles_UPM | No date parameters | Conventional Waitlist | 5-10 lines | Medium | High |
+
+**Total Estimated Lines:** 30-53 lines of code changes  
+**Total Estimated Effort:** Phase 4 revised to 16-18 hours (vs original 12 hours)
+
+##### 3.2.4 Quick Fixes (Phase 1 - 15 minutes)
+
+These 9 one-line fixes provide immediate date filtering for multiple workflows:
+
+**1. Initialize Undefined Variables**
+```sql
+-- In uspTaskSummaryDashboardCount_UPM after line 281
+SET @LV_StartDate = @IPVC_STARTDATE;
+SET @LV_ENDDate = @IPVC_ENDDATE;
+```
+**Workflows Fixed:** Appointment, Follow-up
+
+**2-8. Add BETWEEN Clauses to Inline Queries**
+
+| # | Workflow Code | Addition | Line Approx |
+|---|---|---|---|
+| 2 | MIN | `AND L.leaStartDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 350 |
+| 3 | MOU | `AND L.leaNoticeForDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 375 |
+| 4 | RFAS | `AND L.leaEndDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 400 |
+| 5 | ApplicantFAS | `AND L.leaEndDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 415 |
+| 6 | FAS-PEND | `AND L.leaEndDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 430 |
+| 7 | NRFAS | `AND FSRH.CreatedDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 480 |
+| 8 | PVR | `AND RP.CreatedDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 507 |
+| 9 | FVR | `AND RP.CreatedDate BETWEEN @LD_STARTDATE AND @LD_ENDDATE` | 513 |
+
+**Impact:** 9 out of 16 workflows immediately get date filtering  
+**Total Effort:** ~15 minutes
+
+##### 3.2.4 Procedure Modifications (Phase 2 - 4-6 hours)
+
+For workflows that depend on called procedures, modify these 5 stored procedures:
+
+**Modification #1: uspFASRefundCountSelect_UPM**
+- **Current:** No date parameters
+- **Add:** `@IPVC_STARTDATE VARCHAR(10) = NULL`, `@IPVC_ENDDATE VARCHAR(10) = NULL`
+- **Workflows Fixed:** FAS-READY-APP (FAS-0), FAS-REJECTED (FAS-2)
+- **Date Field:** FAS approval/rejection date (TBD by query analysis)
+- **Effort:** 5-10 lines
+
+**Modification #2: uspGuarantorTaskListSelectCount_UPM**
+- **Current:** No date parameters
+- **Add:** `@IPVC_STARTDATE VARCHAR(10) = NULL`, `@IPVC_ENDDATE VARCHAR(10) = NULL`
+- **Workflows Fixed:** GFR (Guarantor Form Required)
+- **Date Field:** Form demand/submission date (TBD)
+- **Effort:** 5-10 lines
+
+**Modification #3: uspTasksLGAppsInProgressCountSelect_UPM**
+- **Current:** No date parameters
+- **Add:** `@IPVC_STARTDATE VARCHAR(10) = NULL`, `@IPVC_ENDDATE VARCHAR(10) = NULL`
+- **Workflows Fixed:** APPINPROG (Application in Progress)
+- **Date Field:** Application creation/submission date
+- **Effort:** 5-10 lines
+
+**Modification #4: uspNPSTodayTaskListCountSelect_UPM (Property Database)**
+- **Current:** Receives NULL dates
+- **Check:** May already support date range (verify in Property DB)
+- **Workflows Fixed:** Appointment, Follow-up (after variable fix)
+- **Effort:** 0-5 lines (if already supports dates) or TBD
+
+**Modification #5: uspWaitListSelectTiles_UPM**
+- **Current:** No date parameters, uses system date
+- **Add:** `@IPVC_STARTDATE VARCHAR(10) = NULL`, `@IPVC_ENDDATE VARCHAR(10) = NULL`
+- **Workflows Fixed:** Conventional Waitlist
+- **Date Field:** Lease start date or waitlist entry date
+- **Effort:** 5-10 lines
+
+##### 3.2.5 Implementation Checklist
+
+**Phase 1: Quick Fixes**
+- [ ] Line 281: Initialize @LV_StartDate from @IPVC_STARTDATE
+- [ ] Line 281: Initialize @LV_ENDDate from @IPVC_ENDDATE
+- [ ] Line 350: Add BETWEEN clause to MIN query
+- [ ] Line 375: Add BETWEEN clause to MOU query
+- [ ] Line 400: Add BETWEEN clause to RFAS query
+- [ ] Line 415: Add BETWEEN clause to ApplicantFAS query
+- [ ] Line 430: Add BETWEEN clause to FAS-PEND query
+- [ ] Line 480: Add BETWEEN clause to NRFAS query
+- [ ] Line 507: Add BETWEEN clause to PVR subquery
+- [ ] Line 513: Add BETWEEN clause to FVR subquery
+
+**Phase 2: Procedure Modifications**
+- [ ] Analyze uspFASRefundCountSelect_UPM query to identify date columns
+- [ ] Add date parameters and BETWEEN clause to uspFASRefundCountSelect_UPM
+- [ ] Analyze uspGuarantorTaskListSelectCount_UPM query
+- [ ] Add date parameters and BETWEEN clause to uspGuarantorTaskListSelectCount_UPM
+- [ ] Analyze uspTasksLGAppsInProgressCountSelect_UPM query
+- [ ] Add date parameters and BETWEEN clause to uspTasksLGAppsInProgressCountSelect_UPM
+- [ ] Verify uspNPSTodayTaskListCountSelect_UPM date support
+- [ ] Add date parameters if needed to uspNPSTodayTaskListCountSelect_UPM
+- [ ] Analyze uspWaitListSelectTiles_UPM query
+- [ ] Add date parameters and BETWEEN clause to uspWaitListSelectTiles_UPM
+- [ ] Update uspGetTaskSummaryTileSummary_UPM call to uspWaitListSelectTiles_UPM to pass dates
+
+**Phase 3: Testing**
+- [ ] Unit test: Each inline query with BETWEEN clause
+- [ ] Integration test: All 16 workflows return filtered counts
+- [ ] SQL test: Date range logic, boundary cases, legacy compat
+- [ ] Performance test: < 2s for 90-day ranges
+- [ ] UAT: Customer validates filtering accuracy
+
+---
+
 ## Development Effort Estimates
 
 ### Phase 1: Frontend UI Changes
@@ -1173,31 +1617,56 @@ END
 **Subtotal: 6 hours**
 
 ### Phase 4: Database & SQL
-**Total Effort: 12 hours**
+**Total Effort: 18 hours** *(Revised from 12 hours based on detailed bug analysis)*
 
 | Task | Component | Hours | Notes |
 |------|-----------|-------|-------|
-| Main SP Fix | uspGetTaskSummaryTileSummary_UPM.sql | 4 | FIX THE BUG: replace hardcoded logic |
-| Dashboard Count SP | uspTaskSummaryDashboardCount_UPM.sql | 3 | Update all 16 workflow UNIONs with BETWEEN |
-| Filter Options SP | uspGetTaskSummaryTileFilters.sql | 1.5 | Update default date range |
-| Legacy SPs | uspTaskSummaryCountSelect_UPM.sql + others | 2 | Update if used, else deprecate |
-| Integration |uspFASRefundCountSelect_UPM.sql, uspGuarantorTaskListSelectCount_UPM.sql | 1 | Review and update for consistency |
-| Deployment Script | Deploy_WI2404320_DateRangeFilter.sql | 0.5 | Create backup and deployment script |
+| BUG #1 Fix | uspTaskSummaryDashboardCount_UPM (lines 281, 295) | 0.5 | Initialize @LV_StartDate, @LV_ENDDate (CRITICAL) |
+| BUG #2 Fix | uspTaskSummaryDashboardCount_UPM (line 375) | 0.25 | Add BETWEEN to MOU query |
+| Quick Fixes Phase | uspTaskSummaryDashboardCount_UPM (lines 350,400,415,430,480,507,513) | 0.75 | 7 one-line BETWEEN clauses (MIN, RFAS, ApplicantFAS, FAS-PEND, NRFAS, PVR, FVR) |
+| BUG #3 Fix | uspFASRefundCountSelect_UPM.sql | 2 | Add @IPVC_STARTDATE/@IPVC_ENDDATE params + BETWEEN clause (FAS approval/rejection) |
+| BUG #4 Fix | uspGuarantorTaskListSelectCount_UPM.sql | 2 | Add @IPVC_STARTDATE/@IPVC_ENDDATE params + BETWEEN clause (GFR) |
+| BUG #5 Fix | uspTasksLGAppsInProgressCountSelect_UPM.sql | 2 | Add @IPVC_STARTDATE/@IPVC_ENDDATE params + BETWEEN clause (APPINPROG) |
+| BUG #6 Fix | uspNPSTodayTaskListCountSelect_UPM.sql | 1 | Verify date support (may already exist); ensure called with initialized dates |
+| BUG #7 Fix | uspWaitListSelectTiles_UPM.sql | 2 | Add @IPVC_STARTDATE/@IPVC_ENDDATE params + BETWEEN clause (Waitlist) |
+| Main SP Updates | uspGetTaskSummaryTileSummary_UPM.sql | 3 | Update all dynamic SQL calls to pass dates (lines 215-218, 310-316, 335-338, 340-356) |
+| Filter Options SP | uspGetTaskSummaryTileFilters.sql | 1.5 | Update default date range display logic |
+| Legacy SPs | uspGetTaskSummaryTileSummary.sql + uspTaskSummaryCountSelect_UPM.sql | 1.5 | Update if used, else deprecate; maintain backward compat |
+| Deployment Script | Deploy_WI2404320_DateRangeFilter.sql | 1.5 | Create backup, dry-run, and deployment script; rollback procedures |
+| Code Review & Testing | SQL verification | 0.5 | Verify all changes, test for syntax errors |
 
-**Subtotal: 12 hours**
+**Subtotal: 18 hours**
+
+**Effort Rationale:**
+- Original estimate (12 hours) did not account for 5 additional procedures with bugs
+- Deep analysis identified 7 critical bugs (plus sub-bugs) requiring fixes
+- Quick fixes alone (1.5 hours) address 9 of 16 workflows
+- Procedure modifications (9 hours) required for remaining 7 workflows
+- Deployment complexity increased due to cross-database dependencies
+- Additional testing and rollback planning needed for multi-database changes
 
 ### Phase 5: Testing
-**Total Effort: 15 hours**
+**Total Effort: 18 hours** *(Revised from 15 hours due to additional stored procedures)*
 
 | Task | Category | Hours | Notes |
 |------|----------|-------|-------|
-| Unit Tests (C#) | UI, Controller, DAO | 5 | 20+ test cases covering validation, legacy compat |
-| Integration Tests | End-to-end flow | 4 | Test UI → API → DB path |
-| SQL Tests | Stored procedures | 3 | Test date range logic, performance, edge cases |
-| UAT Scenarios | Manual testing | 2 | Test with actual data, multiple properties |
-| Performance Tests | Load testing | 1 | Verify <2s response time |
+| Unit Tests (C#) | UI, Controller, DAO | 5 | 20+ test cases covering validation, legacy compat, all branches |
+| Integration Tests | End-to-end flow | 5 | Test UI → API → DB path for all 16 workflows (revised: more procedures = more paths) |
+| SQL Tests - Inline Queries | uspTaskSummaryDashboardCount_UPM | 2 | Test 9 inline BETWEEN clauses (MIN, MOU, RFAS, ApplicantFAS, FAS-PEND, NRFAS, PVR, FVR) |
+| SQL Tests - Procedures | 5 updated procedures | 3 | Test FASRefund, Guarantor, AppInProgress, Waitlist, NPSToday procedures with date ranges |
+| SQL Tests - Performance | Date range queries | 1 | Verify <2s for 90-day ranges on 100K+ records |
+| UAT Scenarios | Manual testing | 1.5 | Test with actual data, multiple properties, all 16 workflows + edge cases |
+| Performance & Load Tests | Full workflow | 0.5 | Verify <500ms API + <2s DB total with concurrent requests |
 
-**Subtotal: 15 hours**
+**Subtotal: 18 hours**
+
+**Effort Rationale:**
+- Original estimate (15 hours) focused on primary path
+- 5 additional procedures require dedicated test plans
+- 9 inline query modifications need individual testing
+- Cross-database calls (dynamic SQL) require integration testing
+- All 16 workflows must be covered with date filtering validation
+- Performance regression testing critical due to BETWEEN clauses
 
 ### Phase 6: Release & Documentation
 **Total Effort: 6 hours**
@@ -1616,13 +2085,18 @@ END AS PerformanceResult
 - [ ] Custom events tracked in LaunchDarkly
 
 ### AC3: Database Execution
-- [ ] Main SP bug fixed (removed hardcoded same-day logic)
-- [ ] All 7 SPs updated to accept date range parameters
+- [ ] Main SP bug fixed (removed hardcoded same-day logic) - uspGetTaskSummaryTileSummary_UPM
+- [ ] Critical bug #1 fixed (undefined variables initialized) - uspTaskSummaryDashboardCount_UPM
+- [ ] Critical bug #2 fixed (MOU BETWEEN clause added) - uspTaskSummaryDashboardCount_UPM
+- [ ] All 9 inline query BETWEEN clauses added (MIN, MOU, RFAS, ApplicantFAS, FAS-PEND, NRFAS, PVR, FVR) - uspTaskSummaryDashboardCount_UPM
+- [ ] 5 called procedures updated with date parameters: uspFASRefundCountSelect_UPM, uspGuarantorTaskListSelectCount_UPM, uspTasksLGAppsInProgressCountSelect_UPM, uspNPSTodayTaskListCountSelect_UPM, uspWaitListSelectTiles_UPM
+- [ ] All dynamic SQL calls updated to pass date parameters
 - [ ] BETWEEN clauses properly include full end day
 - [ ] All 16 workflows return correct date-filtered counts
 - [ ] Performance: queries complete in < 2 seconds
 - [ ] Backward compatible with single-date queries
 - [ ] Error handling for invalid date ranges
+- [ ] Legacy procedures maintained or deprecated with notice
 
 ### AC4: Testing Coverage
 - [ ] Unit tests: UI, Controller, DAO (20+ test cases)
